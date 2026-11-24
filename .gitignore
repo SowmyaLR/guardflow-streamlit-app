@@ -1,0 +1,29 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Model and ML caches
+.cache/
+.cache-huggingface/
+huggingface/
+models/
+*.safetensors
+*.bin
+
+# Environment variables
+.env
+.env.*
+
+# OS/editor files
+.DS_Store
+.vscode/
+.idea/
