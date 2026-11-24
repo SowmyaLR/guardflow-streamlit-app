@@ -1,2 +1,3 @@
 streamlit>=1.41,<2
 guardflow[all]
+presidio-analyzer==2.2.366
