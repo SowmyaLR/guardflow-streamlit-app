@@ -1,108 +1,171 @@
 import streamlit as st
 
-from demo_core import EXAMPLES, MAX_CHARS, get_guard, inspect_text, result_rows
-
-st.set_page_config(
-    page_title="GuardFlow · Agent Prompt Firewall",
-    page_icon="🛡️",
-    layout="wide",
+from demo_core import (
+    EXAMPLES,
+    GUARDS,
+    INJECTION_THRESHOLD,
+    MAX_CHARS,
+    MAX_TOKENS,
+    WARNING_TOKENS,
+    InvalidInput,
+    PromptInjectionFailed,
+    inspect_text,
 )
 
-with st.spinner("Loading GuardFlow and local detection models…"):
-    try:
-        get_guard()
-        st.session_state["guardflow_startup_error"] = None
-    except Exception as exc:
-        st.session_state["guardflow_startup_error"] = (
-            f"{type(exc).__name__}: {exc}"
+GUARD_HELP = {
+    "token_limit": (
+        f"Checks size first. Warns from {WARNING_TOKENS} estimated tokens and blocks "
+        f"above {MAX_TOKENS} before the other guards run."
+    ),
+    "input_sanitizer": "Normalizes invisible Unicode and control characters before later checks.",
+    "secrets": "Redacts likely credentials before the processed text moves downstream.",
+    "prompt_injection": f"Uses a local classifier and blocks at a score of {INJECTION_THRESHOLD:.2f}.",
+}
+
+INTEGRATION_EXAMPLE = f"""from guardflow import (
+    GuardFlow, InputSanitizer, PromptInjectionGuard,
+    SecretsGuard, TokenLimitGuard,
+)
+
+guard = GuardFlow(guards=[
+    TokenLimitGuard(max_tokens={MAX_TOKENS}, warning_tokens={WARNING_TOKENS}),
+    InputSanitizer(),
+    SecretsGuard(),
+    PromptInjectionGuard(threshold={INJECTION_THRESHOLD}),
+])
+
+def guarded_invoke(prompt, invoke_model):
+    result = guard.inspect(prompt)
+    if not result.allowed:
+        raise ValueError("Prompt blocked by GuardFlow")
+    return invoke_model(result.text)
+"""
+
+
+def main():
+    st.set_page_config(
+        page_title="GuardFlow Security Playground",
+        page_icon="🛡️",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    with st.sidebar:
+        st.header("About GuardFlow")
+        st.write(
+            "GuardFlow is a local-first Python SDK that lets you compose checks for "
+            "untrusted input. Each guard reports its action and why it took it. "
+            "A guard can also pass modified text to the next check."
+        )
+        st.markdown(
+            "- [GuardFlow on GitHub](https://github.com/SowmyaLR/GuardFlow)\n"
+            "- [GuardFlow on PyPI](https://pypi.org/project/guardflow/)\n"
+            "- [Hugging Face demo](https://huggingface.co/spaces/lrsowmya/guardflow-demo-app)"
         )
 
-st.title("GuardFlow · Agent Prompt Firewall")
-st.caption(
-    "A user prompt enters an AI agent. GuardFlow checks it before the agent "
-    "can access mock records or call a tool."
-)
-
-st.warning(
-    "Use synthetic examples only. Never paste real patient, financial, or "
-    "confidential data. This demo makes no external LLM calls, stores no chat "
-    "history, and does not intentionally log raw submissions. Hosting providers "
-    "may collect operational telemetry."
-)
-
-startup_error = st.session_state.get("guardflow_startup_error")
-if startup_error:
-    st.error(f"GuardFlow failed to initialize: {startup_error}")
-    st.info(
-        "The PII and prompt-injection guards download local models on first "
-        "startup. Check internet access to Hugging Face, available memory and "
-        "disk space, then restart the app."
-    )
-
-with st.sidebar:
-    st.subheader("Synthetic agent data")
+    st.title("GuardFlow Security Playground")
+    st.markdown("**Check untrusted input before an LLM or agent can act.**")
     st.write(
-        "The mock agent has access to a fictional customer profile and a fake "
-        "development configuration. Tool actions are simulated and only proceed "
-        "when GuardFlow allows the prompt."
+        "Put GuardFlow between incoming text and your model call. It can stop oversized "
+        "requests early, clean copied text, redact likely credentials, and flag attempts "
+        "to override instructions. Try a developer scenario to see what your application "
+        "would receive from the SDK."
     )
-    st.caption("No real records, credentials, external APIs, or LLM are connected.")
+    st.markdown("**Incoming prompt → GuardFlow → Application decision**")
+    st.caption(
+        "If allowed, pass GuardFlow’s processed text downstream. If blocked, stop the "
+        "request before calling the model or tools. This playground only runs the checks."
+    )
+    st.warning(
+        "Use synthetic text only. Keep real credentials, personal data, and confidential "
+        "content out of this demo. Your submission is processed on the app server."
+    )
 
-sample = st.selectbox("Prompt scenario", list(EXAMPLES))
-prompt = st.text_area(
-    "User prompt",
-    value=EXAMPLES[sample],
-    max_chars=MAX_CHARS,
-    height=150,
-    placeholder="Ask the demo agent something…",
-)
+    with st.expander("Use GuardFlow in your Python app"):
+        st.write(
+            "Install the extras for secrets detection and prompt injection. "
+            "Pass your model client’s callable as `invoke_model`."
+        )
+        st.code("python -m pip install 'guardflow[secrets,injection]==0.1.0'", language="bash")
+        st.code(INTEGRATION_EXAMPLE, language="python")
+        st.caption(
+            "Use the pipeline decision, `result.allowed`, even when individual guards "
+            "report warnings, sanitization, or redaction. Keep authorization checks "
+            "in place for tools and data access."
+        )
 
-if st.button(
-    "Send to guarded agent",
-    type="primary",
-    disabled=bool(startup_error),
-):
+    pipeline, editor = st.columns([1, 2], gap="large")
+    with pipeline:
+        st.subheader("Guard pipeline")
+        st.caption("Checked guards run in order. Each sees the text left by the previous guard.")
+        selected = []
+        for name, label in GUARDS.items():
+            if st.checkbox(label, value=True, key=name):
+                selected.append(name)
+            st.caption(GUARD_HELP[name])
+        if "prompt_injection" in selected:
+            st.caption("The first prompt-injection check may take longer while the model loads.")
+
+    with editor:
+        st.subheader("Test a prompt")
+        sample = st.selectbox("Developer scenario", options=list(EXAMPLES))
+        example = EXAMPLES[sample]
+        st.caption(example.context)
+        with st.form("inspection", clear_on_submit=True):
+            prompt = st.text_area(
+                "Prompt to inspect",
+                value=example.prompt,
+                height=220,
+                max_chars=MAX_CHARS,
+                help=f"Up to {MAX_CHARS:,} characters. The editor resets to the selected example on submit.",
+            )
+            submitted = st.form_submit_button("Inspect with GuardFlow", type="primary")
+
+    if submitted:
+        show_inspection(prompt, selected)
+
+
+def show_inspection(prompt, selected):
     try:
-        with st.spinner("Inspecting prompt with the loaded GuardFlow pipeline…"):
-            result, elapsed_ms = inspect_text(prompt)
-
-        st.metric("Pipeline latency", f"{elapsed_ms:.2f} ms")
-        allowed = result.allowed
-        st.metric(
-            "GuardFlow decision",
-            "ALLOW · agent may continue"
-            if allowed
-            else "BLOCK · agent and tools stopped",
+        with st.spinner("Running selected guards…"):
+            allowed, latency, rows, _token_count = inspect_text(prompt, selected)
+    except InvalidInput as error:
+        st.warning(str(error))
+        return
+    except PromptInjectionFailed:
+        st.error(
+            "The prompt-injection check could not finish. Check the app server's "
+            "model download access and available memory, then retry."
         )
+        return
+    except Exception:
+        st.error("GuardFlow could not complete the inspection. Try again with a synthetic example.")
+        return
 
-        st.subheader("Agent action")
-        if allowed:
-            st.success(
-                "GuardFlow allowed this prompt. In a real integration, the agent "
-                "could continue with only its authorized data and tools."
-            )
-            st.info(
-                "This playground does not call an LLM or execute tools. "
-                "The security decision shown below comes from GuardFlow."
-            )
-        else:
-            st.error("The agent did not receive the prompt and no tool action ran.")
+    st.subheader("Inspection results")
+    decision, timing = st.columns(2)
+    decision.metric("Application decision", "ALLOW" if allowed else "BLOCK")
+    timing.metric("Total guard latency", f"{latency:.2f} ms")
+    if not allowed:
+        blocked_by = next(row["Guard"] for row in rows if row["Decision"] == "BLOCK")
+        st.error(f"{blocked_by} blocked this prompt. An application should stop here.")
+    elif any(row["Decision"] in {"SANITIZE", "REDACT"} for row in rows):
+        st.success("The application can continue with the processed text in `result.text`.")
+    else:
+        st.success("The application can continue with `result.text`. Review any warnings below.")
 
-        st.subheader("Guard-by-guard inspection")
-        st.dataframe(
-            result_rows(result),
-            use_container_width=True,
-            hide_index=True,
-        )
+    st.dataframe(
+        rows,
+        hide_index=True,
+        column_config={
+            "Latency (ms)": st.column_config.NumberColumn(format="%.3f"),
+            "Injection score": st.column_config.NumberColumn(
+                format="%.4f",
+                help=f"Classifier score between 0 and 1. The block threshold is {INJECTION_THRESHOLD:.2f}.",
+            ),
+        },
+    )
+    st.caption("Results show findings and timings without replaying submitted or processed text.")
 
-        if result.text and result.text != prompt:
-            st.subheader("GuardFlow processed text")
-            st.code(result.text, language="text")
 
-    except Exception as exc:
-        st.error(f"GuardFlow inspection failed: {type(exc).__name__}: {exc}")
-        st.info(
-            "Check the terminal running Streamlit for the full traceback. "
-            "If model initialization failed, check Hugging Face connectivity, "
-            "available memory, and disk space, then restart the app."
-        )
+if __name__ == "__main__":
+    main()
